@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5ef">
+  <title>Plenx · Generation desk</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Plenx home"><span class="brand-mark">p.</span> plenx<span class="brand-note">/ local</span></a>
+    <div class="sidebar-heading"><h2>Accounts <span id="account-count">0</span></h2><div class="sidebar-actions"><button id="logout" class="secondary" hidden>Log out</button><button id="add-account" class="icon-button" aria-label="Add account" disabled>+</button></div></div>
+    <div id="accounts" class="account-list"></div>
+    <p id="account-empty" class="small muted">Add a Plenx account to get started.</p>
+    <div class="sidebar-bottom"><span class="small mono">PLENX TOKENS STAY ON THE SERVER</span><p>Sign in with your wrapper password to use and manage accounts.</p><p><a href="/llms.txt" target="_blank" rel="noopener">Agent API guide ↗</a></p></div>
+  </aside>
+
+  <main>
+    <header class="page-header"><div><p class="eyebrow">PLENX / GENERATION CONSOLE</p><h1>Generation desk<span>.</span></h1><p class="subtitle">A place for your prompts, accounts, and works in progress.</p></div><span class="connection"><span></span> Local service</span></header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+    <section class="composer panel" aria-labelledby="composer-title">
+      <div class="panel-heading"><div class="heading-inline"><span class="section-number">01</span><h2 id="composer-title">New generation</h2></div><div class="mode-switch" role="group" aria-label="Media type"><button id="mode-video" type="button" aria-pressed="true">Video</button><button id="mode-image" type="button" aria-pressed="false">Image</button></div></div>
+      <form id="generation-form">
+        <label class="field-label" for="generation-account">Account</label><select id="generation-account" required><option value="">Add an account first</option></select>
+        <div id="account-summary" class="account-summary" aria-live="polite" hidden></div>
+        <label class="field-label prompt-label" for="prompt">Your prompt</label><textarea id="prompt" name="prompt" placeholder="A cat watching the city wake up, soft morning light…" rows="3" maxlength="20000" required></textarea>
+        <div id="video-fields" class="field-grid">
+          <label>Model<input id="video-model" value="omni-flash" required maxlength="100"></label>
+          <label>Aspect ratio<input id="video-aspect" value="16:9" required maxlength="20"></label>
+          <label>Duration <span class="muted">/ seconds</span><input id="video-duration" type="number" value="4" min="1" step="1" required></label>
+          <label>Resolution<input id="video-resolution" value="720" required maxlength="30"></label>
+        </div>
+        <div id="image-fields" class="field-grid" hidden>
+          <label>Model<input value="gem-pix-2" readonly aria-label="Image model"></label>
+          <label>Aspect ratio<input id="image-aspect" value="1:1" required maxlength="20" disabled></label>
+          <label>Images<input id="image-count" type="number" value="1" min="1" step="1" required disabled></label>
+          <label>Resolution<input id="image-resolution" value="1k" required maxlength="30" disabled></label>
+        </div>
+        <details id="advanced"><summary>Advanced settings</summary><div class="advanced-content">
+          <div class="field-grid two"><label>Server ID<input id="server-id" required pattern="[0-9a-fA-F-]{36}"></label><label>Workplace ID <span class="muted">/ optional</span><input id="workplace-id" placeholder="Use this account’s default workplace" pattern="[0-9a-fA-F-]{36}"></label></div>
+          <div id="image-advanced" hidden><div class="field-grid">
+            <label>Guidance scale<input id="image-guidance" type="number" value="3.5" min="0" step="any" required disabled></label>
+            <label>Inference steps<input id="image-steps" type="number" value="20" min="1" step="1" required disabled></label>
+            <label>Output format<input id="image-format" value="jpeg" required maxlength="20" disabled></label>
+            <label>Resolution tier<input id="image-tier" value="1k" required maxlength="30" disabled></label>
+          </div><div class="checkbox-row"><label><input id="image-fast" type="checkbox" checked disabled> Go fast</label><label><input id="image-credits" type="checkbox" disabled> Uses credits</label></div><label class="field-label" for="image-references">Reference image URLs <span class="muted">/ one per line, up to 20</span></label><textarea id="image-references" rows="2" placeholder="https://…" disabled></textarea></div>
+          <p class="small muted">Leave the workplace ID blank to use the selected account’s default workplace. Credit usage is determined by Plenx.</p>
+        </div></details>
+        <div class="composer-footer"><p id="generation-hint" class="small muted">Video · omni-flash · submitted with your selected account</p><button id="generate" class="primary" type="submit" disabled>Generate video <span aria-hidden="true">↗</span></button></div>
+      </form>
+    </section>
+
+    <section class="requests-section" aria-labelledby="requests-title">
+      <div class="requests-heading"><div class="heading-inline"><span class="section-number">02</span><h2 id="requests-title">Requests</h2><span id="request-count" class="count">0</span></div><div class="requests-actions"><label class="auto-poll"><input id="auto-poll" type="checkbox" checked> Auto refresh</label><button id="refresh" class="secondary">Refresh ↻</button></div></div>
+      <div class="filters"><div id="status-filters" role="group" aria-label="Filter requests"><button data-filter="all" aria-pressed="true">All</button><button data-filter="active" aria-pressed="false">In progress <span id="active-count">0</span></button><button data-filter="completed" aria-pressed="false">Completed</button><button data-filter="failed" aria-pressed="false">Issues</button></div><label class="sr-only" for="account-filter">Filter by account</label><select id="account-filter"><option value="">All accounts</option></select></div>
+      <div id="request-list" class="request-list"></div>
+      <div id="empty-requests" class="empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h3>Make something.</h3><p>Your generations will appear here.<br>We’ll keep an eye on the queue for you.</p></div>
+      <p class="history-note small muted">All active + latest 200 finished requests per account · polls every 5 seconds while this page is open</p>
+    </section>
+    <footer class="page-footer"><span>PLENX / LOCAL WORKSPACE</span><span>One prompt at a time.</span></footer>
+  </main>
+
+  <dialog id="account-dialog" aria-labelledby="account-dialog-title"><form id="account-form"><div class="dialog-heading"><h2 id="account-dialog-title">Add account</h2><button id="close-account" type="button" class="icon-button" aria-label="Close account dialog">×</button></div><label class="field-label" for="account-name">Account name</label><input id="account-name" placeholder="Personal account" required maxlength="80" autocomplete="off"><label id="token-label" class="field-label" for="account-token">Plenx auth token</label><input id="account-token" type="password" placeholder="Paste token or Bearer …" autocomplete="off" spellcheck="false"><p class="small muted">Enter a Plenx token once to save it on the server. It is never returned or saved in browser storage. Leave this field blank when editing to keep the current server-side token.</p><p id="account-error" class="error-text small" role="alert" hidden></p><div class="dialog-footer"><button id="remove-account" class="danger secondary" type="button" hidden>Remove account</button><button class="primary" type="submit">Save account</button></div></form></dialog>
+  <dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form"><div class="dialog-heading"><h2 id="login-title">Unlock your workspace</h2></div><label class="field-label" for="wrapper-password">Wrapper password</label><input id="wrapper-password" type="password" required autocomplete="current-password" placeholder="Your wrapper password"><div id="confirm-password-field" hidden><label class="field-label" for="confirm-password">Confirm wrapper password</label><input id="confirm-password" type="password" autocomplete="new-password" placeholder="Enter the same password again" disabled></div><p id="login-help" class="small muted">Checking whether this server needs password setup…</p><p id="login-error" class="error-text small" role="alert" hidden></p><div class="dialog-footer"><button id="login-submit" class="primary" type="submit" disabled>Sign in</button></div></form></dialog>
+</body>
+</html>
