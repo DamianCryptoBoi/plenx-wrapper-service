@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const LEGACY_STORAGE_KEY = "plenx.accounts.v1";
 const SELECTED_KEY = "plenx.selectedAccount.v1";
 const SERVER_IDS = {video: "56947b53-029e-4751-bbca-b9de54f5d628", image: "dd597ae5-6ab3-4e76-9914-9da5589e21c1"};
-const ACTIVE = new Set(["queued", "pending", "processing", "running", "submitting", "in_progress", "starting"]);
+const ACTIVE = new Set(["waiting", "queued", "pending", "processing", "running", "submitting", "in_progress", "starting"]);
 const COMPLETED = new Set(["completed", "succeeded", "success"]);
 const jobsByAccount = new Map();
 const profilesByAccount = new Map();
@@ -328,7 +328,7 @@ function setMode(next) {
   $("image-advanced").querySelectorAll("input,select,textarea").forEach(input => { input.disabled = mode !== "image"; });
   $("server-id").value = SERVER_IDS[mode];
   $("generate").replaceChildren(document.createTextNode(`Generate ${mode} `), node("span", "", "↗"));
-  $("generation-hint").textContent = `${mode === "video" ? "Video · omni-flash" : "Image · gem-pix-2"} · submitted with your selected account`;
+  $("generation-hint").textContent = `${mode === "video" ? "Video" : "Image"} · up to 10 active per account · excess requests queued`;
 }
 $("mode-video").addEventListener("click", () => setMode("video"));
 $("mode-image").addEventListener("click", () => setMode("image"));
@@ -377,6 +377,8 @@ $("generation-form").addEventListener("submit", async (event) => {
       path = "/api/v1/veo/generate";
       const body = new FormData();
       Object.entries({prompt, model: $("video-model").value.trim(), aspect_ratio: $("video-aspect").value.trim(), duration: $("video-duration").value, resolution: $("video-resolution").value.trim(), server_id: $("server-id").value.trim()}).forEach(([key, value]) => body.append(key, value));
+      const references = $("video-references").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      body.append("reference_images", JSON.stringify(references));
       if ($("workplace-id").value.trim()) body.append("workplace_id", $("workplace-id").value.trim());
       options = {method: "POST", body};
     } else {
@@ -425,11 +427,13 @@ function renderJob(job) {
   [job.accountName, job.kind === "video" ? parameters.model : "gem-pix-2", parameters.aspect_ratio, job.kind === "video" ? `${parameters.duration}s / ${parameters.resolution}p` : parameters.resolution, new Date(job.created_at).toLocaleString()].forEach(text => meta.append(node("span", "", text)));
   content.append(meta);
   if (job.task_id) content.append(node("p", "job-meta job-id", job.task_id));
+  else content.append(node("p", "job-meta job-id", `Request ${job.id}`));
   if (ACTIVE.has(job.status)) {
     const progress = job.response?.progress;
     const message = job.response?.current_step || job.response?.message;
-    const position = job.response?.position;
-    const pieces = [typeof progress === "number" ? `${progress}%` : null, position ? `Queue #${position}` : null, message];
+    const waitingForSlot = job.status === "waiting" && !job.task_id;
+    const position = waitingForSlot ? job.queue_position : job.response?.position;
+    const pieces = [typeof progress === "number" ? `${progress}%` : null, position ? `${waitingForSlot ? "Waiting for slot" : "Queue"} #${position}` : null, message];
     const text = pieces.filter(Boolean).join(" · ");
     if (text) content.append(node("p", "progress-text", text));
   }
@@ -438,7 +442,7 @@ function renderJob(job) {
   const side = node("div", "job-side");
   // Status text is untrusted; class names are restricted to known values.
   const statusClass = ACTIVE.has(job.status) ? "processing" : COMPLETED.has(job.status) ? "completed" : "failed";
-  side.append(node("span", `badge ${statusClass}`, job.status.replaceAll("_", " ")));
+  side.append(node("span", `badge ${statusClass}`, job.status === "waiting" && !job.task_id ? "waiting for slot" : job.status.replaceAll("_", " ")));
   const urls = mediaUrls(job);
   if (urls.length) {
     const previews = node("div", "job-media");
@@ -503,33 +507,13 @@ async function refresh({credits = false} = {}) {
       try {
         const first = await api(account, "/api/requests");
         if (!accounts.some(a => a.id === account.id && a.updated_at === account.updated_at)) return;
+        const previous = new Map((jobsByAccount.get(account.id) || []).map(job => [job.id, job]));
+        const finished = first.requests.some(job => ACTIVE.has(previous.get(job.id)?.status) && !ACTIVE.has(job.status));
         jobsByAccount.set(account.id, first.requests);
-        const active = first.requests.filter(job => job.task_id && ACTIVE.has(job.status));
         if ((cooldowns.get(account.id) || 0) > Date.now()) return;
         const profile = profilesByAccount.get(account.id);
-        if (credits || !profile || Date.now() - profile.lastAttempt >= 60000) await refreshProfile(account);
-        if (accountIssues.get(account.id)?.auth || (cooldowns.get(account.id) || 0) > Date.now()) return;
-        let finished = false;
-        // Bound concurrency for accounts with many active requests.
-        for (let offset = 0; offset < active.length; offset += 4) {
-          const results = await Promise.all(active.slice(offset, offset + 4).map(async job => {
-            try {
-              const data = await api(account, `/api/v1/${job.kind === "video" ? "video" : "queue"}/status/${encodeURIComponent(job.task_id)}`);
-              if (!ACTIVE.has(data.status.toLowerCase())) finished = true;
-              return null;
-            } catch (error) { return error; }
-          }));
-          const error = results.find(Boolean);
-          if (error) {
-            accountIssues.set(account.id, {message: error.message, auth: error.status === 401 || error.status === 403});
-            if (error.status === 401 || error.status === 403 || error.status === 429) break;
-          } else accountIssues.delete(account.id);
-        }
-        if (active.length) {
-          const latest = await api(account, "/api/requests");
-          if (accounts.some(a => a.id === account.id && a.updated_at === account.updated_at)) jobsByAccount.set(account.id, latest.requests);
-        }
-        if (finished && (cooldowns.get(account.id) || 0) <= Date.now()) await refreshProfile(account);
+        // The server polls Plenx and drains the queue even when this page is closed.
+        if (credits || finished || !profile || Date.now() - profile.lastAttempt >= 60000) await refreshProfile(account);
       } catch (error) {
         if (!wrapperPassword) return;
         accountIssues.set(account.id, {message: error.message});

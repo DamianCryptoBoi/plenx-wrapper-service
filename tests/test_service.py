@@ -1,4 +1,6 @@
 import json
+from email import policy
+from email.parser import BytesParser
 import os
 from pathlib import Path
 import tempfile
@@ -71,6 +73,7 @@ class ServiceTests(unittest.TestCase):
         self.client = TestClient(self.app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
+        self.app.state.upstream = self.upstream
         created = self.client.post("/api/accounts", headers=AUTH, json={"name": "Test account", "token": TOKEN})
         self.assertEqual(created.status_code, 201)
         self.account_id = created.json()["id"]
@@ -101,6 +104,35 @@ class ServiceTests(unittest.TestCase):
         workplace = "45e06a7a-1318-433c-8338-dcfcf52d7b5a"
         self.assertEqual(self.submit(workplace_id=workplace).status_code, 200)
         self.assertIn(workplace, self.requests[0].content.decode())
+
+    def test_video_reference_images_are_forwarded_as_one_json_array(self):
+        references = [
+            "https://images.plenxai.com/cdn-cgi/imagedelivery/kdQv2TNFsgg6nS5bfVdpTg/3b98720c-0655-4255-755e-f5486a5ddc00/format=png,quality=100",
+            "https://example.test/another-reference.png?frame=2&quality=100",
+        ]
+        response = self.submit(reference_images=json.dumps(references))
+        self.assertEqual(response.status_code, 200, response.text)
+        request = self.requests[-1]
+        message = BytesParser(policy=policy.default).parsebytes(
+            f"Content-Type: {request.headers['content-type']}\r\n\r\n".encode() + request.content
+        )
+        parts = [part for part in message.iter_parts() if part.get_param("name", header="content-disposition") == "reference_images"]
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(json.loads(parts[0].get_content()), references)
+        self.assertEqual(self.history()[0]["parameters"]["reference_images"], references)
+
+    def test_video_references_default_to_an_empty_array(self):
+        for fields in [{}, {"reference_images": "[]"}]:
+            with self.subTest(fields=fields):
+                self.assertEqual(self.submit(**fields).status_code, 200)
+                self.assertEqual(self.history()[0]["parameters"]["reference_images"], [])
+
+    def test_invalid_video_references_do_not_submit(self):
+        for references in ["not-json", '"https://example.test/ref.png"', '{}', '["javascript:alert(1)"]', '[123]', 'null']:
+            with self.subTest(references=references):
+                self.assertEqual(self.submit(reference_images=references).status_code, 422)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.history(), [])
 
     def test_all_job_routes_require_bearer(self):
         for method, path in [("GET", "/api/accounts"), ("POST", "/api/accounts"), ("PATCH", f"/api/accounts/{self.account_id}"), ("DELETE", f"/api/accounts/{self.account_id}"), ("GET", "/api/config"), ("GET", "/api/v1/users/me"), ("POST", "/api/v1/veo/generate"), ("GET", "/api/requests"), ("GET", f"/api/v1/video/status/{TASK}"), ("POST", "/api/v1/queue/submit"), ("GET", f"/api/v1/queue/status/{TASK}")]:

@@ -130,6 +130,56 @@ async function main() {
   await auth.loadAuthStatus();
   assert.equal(elements.get("login-submit").textContent, "Sign in", "A later visit uses ordinary sign in");
   console.log("Dashboard first-visit setup and sign-in regression passed");
+
+  const videoElements = new Map();
+  const videoValues = {
+    prompt: "a cat", "video-model": "omni-flash", "video-aspect": "16:9", "video-duration": "4",
+    "video-resolution": "720", "server-id": "56947b53-029e-4751-bbca-b9de54f5d628", "workplace-id": "",
+    "video-references": " https://images.plenxai.com/first.png \n\nhttps://example.test/second.png?frame=2&quality=100\r\n",
+  };
+  let videoSubmit;
+  let submittedForm;
+  const video = vm.createContext({
+    FormData, accounts: [{id: "account", name: "Test account"}], selected: "account", mode: "video", submitting: false,
+    $(id) {
+      if (!videoElements.has(id)) videoElements.set(id, {value: videoValues[id] || "", addEventListener(event, handler) { videoSubmit = handler; }});
+      return videoElements.get(id);
+    },
+    async api(account, route, options) {
+      assert.equal(route, "/api/v1/veo/generate");
+      submittedForm = options.body;
+      return {status: "queued"};
+    },
+    notice() {}, setMode() {}, async refresh() {},
+  });
+  const formStart = source.indexOf('$("generation-form").addEventListener');
+  const formEnd = source.indexOf("function mediaUrls(", formStart);
+  vm.runInContext(source.slice(formStart, formEnd), video);
+  await videoSubmit({preventDefault() {}});
+  assert.equal(submittedForm.getAll("reference_images").length, 1);
+  assert.deepEqual(JSON.parse(submittedForm.get("reference_images")), ["https://images.plenxai.com/first.png", "https://example.test/second.png?frame=2&quality=100"]);
+  videoElements.get("video-references").value = " \n ";
+  await videoSubmit({preventDefault() {}});
+  assert.deepEqual(JSON.parse(submittedForm.get("reference_images")), []);
+  console.log("Dashboard video reference-image multipart submission passed");
+
+  const queueJobs = new Map();
+  const waitingJob = {id: "local-request", task_id: null, status: "waiting", queue_position: 2};
+  const queueView = vm.createContext({
+    accounts: [{id: "account", updated_at: "current"}], wrapperPassword: "test", refreshing: false,
+    creditsRefreshPending: false, jobsByAccount: queueJobs, profilesByAccount: new Map(), accountIssues: new Map(), cooldowns: new Map(),
+    ACTIVE: new Set(["waiting"]), $: () => ({}), renderAccounts() {}, renderRequests() {}, notice() {},
+    async refreshProfile() {},
+    async api(account, route) {
+      assert.equal(route, "/api/requests", "Dashboard refresh reads saved status; the server handles upstream polling");
+      return {requests: [waitingJob]};
+    },
+  });
+  vm.runInContext(source.slice(start, end), queueView);
+  await queueView.refresh();
+  assert.equal(queueJobs.get("account")[0].id, "local-request");
+  assert.equal(queueJobs.get("account")[0].queue_position, 2);
+  console.log("Dashboard retains queued local requests without upstream task IDs");
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

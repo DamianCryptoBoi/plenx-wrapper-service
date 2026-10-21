@@ -1,11 +1,17 @@
 """Local Plenx API wrapper. Run: uv run uvicorn main:app --reload."""
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from hmac import compare_digest
+import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
+import time
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -15,9 +21,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, Json, SecretStr, ValidationError
 
-from store import Store
+from store import GENERATION_LIMIT, Store
 
 
 ROOT = Path(__file__).resolve().parent
@@ -35,6 +41,7 @@ class VideoRequest(BaseModel):
     resolution: str = Field(default="720", min_length=1, max_length=30)
     server_id: UUID = UUID(VIDEO_SERVER_ID)
     workplace_id: UUID | None = None
+    reference_images: Json[list[HttpUrl]] = Field(default_factory=list)
 
 
 class ImagePayload(BaseModel):
@@ -154,7 +161,7 @@ async def plenx_request(client: httpx.AsyncClient, method: str, path: str, token
     try:
         response = await client.request(
             method, path, headers={"Authorization": f"Bearer {token}"}, json=body,
-            files={key: (None, str(value)) for key, value in fields.items()} if fields else None,
+            files={key: (None, json.dumps(value) if isinstance(value, list) else str(value)) for key, value in fields.items()} if fields else None,
         )
     except httpx.TimeoutException:
         raise HTTPException(504, "Plenx timed out.") from None
@@ -216,6 +223,27 @@ async def submit(request: Request, account: dict, client: httpx.AsyncClient, kin
             raise HTTPException(502, "Plenx did not return a valid default workplace ID. Supply workplace_id explicitly.") from None
     store = request.app.state.store
     job_id = store.create(account["id"], kind, params)
+    job = store.get(job_id)
+    if job["status"] == "waiting":
+        return JSONResponse(status_code=202, content={
+            "task_id": None, "request_id": job_id, "account_id": account["id"],
+            "status": "waiting", "queue_position": job["queue_position"],
+            "status_url": f"/api/requests/{job_id}",
+            "message": f"Waiting for an available {kind} slot (limit {GENERATION_LIMIT} per account).",
+        })
+    try:
+        return await dispatch_job(store, client, job)
+    except HTTPException as error:
+        remember_queue_failure(request.app, account, error)
+        raise
+
+
+async def dispatch_job(store: Store, client: httpx.AsyncClient, job: dict):
+    account = store.account(job["account_id"])
+    if account is None:
+        store.fail(job["id"], "cancelled", "Account removed before submission.")
+        raise HTTPException(409, "Account removed before submission.")
+    token, kind, params = account["token"], job["kind"], job["parameters"]
     try:
         if kind == "video":
             data = await task_request(client, "POST", "/api/v1/veo/generate", token, fields=params)
@@ -225,10 +253,17 @@ async def submit(request: Request, account: dict, client: httpx.AsyncClient, kin
         # No automatic retries: a network failure can hide an accepted generation.
         if error.status_code >= 500:
             error.detail += " A submission may have been accepted; check Plenx before retrying."
-        store.fail(job_id, "submission_unknown" if error.status_code >= 500 else "failed", error.detail)
+        store.fail(job["id"], "submission_unknown" if error.status_code >= 500 else "failed", error.detail)
         raise
-    store.update(job_id, data)
-    return {**data, "account_id": account["id"], "request_id": job_id}
+    except asyncio.CancelledError:
+        store.fail(job["id"], "submission_unknown", "Service stopped during submission. Check Plenx before retrying.")
+        raise
+    except Exception:
+        message = "Submission outcome unknown. Check Plenx before retrying."
+        store.fail(job["id"], "submission_unknown", message)
+        raise HTTPException(502, message) from None
+    store.update(job["id"], data)
+    return {**data, "account_id": account["id"], "request_id": job["id"], "status_url": f"/api/requests/{job['id']}"}
 
 
 async def poll(request: Request, client: httpx.AsyncClient, kind: str, task_id: UUID, account_id: UUID | None):
@@ -239,17 +274,94 @@ async def poll(request: Request, client: httpx.AsyncClient, kind: str, task_id: 
         raise HTTPException(409, str(error)) from None
     if not job:
         raise HTTPException(404, "Task not found for this account and media type. Submit through this wrapper first.")
-    path = f"/api/v1/{'video' if kind == 'video' else 'queue'}/status/{task_id}"
-    account = store.account(job["owner"])
+    return await poll_job(store, client, store.get(job["id"]))
+
+
+async def poll_job(store: Store, client: httpx.AsyncClient, job: dict):
+    path = f"/api/v1/{'video' if job['kind'] == 'video' else 'queue'}/status/{job['task_id']}"
+    account = store.account(job["account_id"])
+    if account is None:
+        raise HTTPException(404, "Account not found")
     try:
         data = await task_request(client, "GET", path, account["token"])
-        if data["task_id"] != str(task_id):
+        if data["task_id"] != job["task_id"]:
             raise HTTPException(502, "Plenx returned a different task ID")
     except HTTPException as error:
         store.poll_error(job["id"], error.detail)
         raise
     store.update(job["id"], data)
-    return {**data, "account_id": account["id"], "request_id": job["id"]}
+    # A concurrent older poll must not revive a job already known to be terminal.
+    saved = store.get(job["id"])
+    return {**saved["response"], "account_id": account["id"], "request_id": job["id"]}
+
+
+def queue_paused(app: FastAPI, account: dict) -> bool:
+    updated, until = app.state.queue_backoff.get(account["id"], (None, 0))
+    return updated == account["updated_at"] and until > time.monotonic()
+
+
+def remember_queue_failure(app: FastAPI, account: dict, error: HTTPException):
+    if error.status_code in {401, 403}:
+        delay = float("inf")  # Resume after an operator updates this account.
+    elif error.status_code == 429:
+        value = (error.headers or {}).get("Retry-After", "30")
+        try:
+            delay = max(1, float(value))
+        except ValueError:
+            try:
+                delay = max(1, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError):
+                delay = 30
+    else:
+        return
+    app.state.queue_backoff[account["id"]] = (account["updated_at"], time.monotonic() + delay)
+
+
+async def queue_cycle(app: FastAPI):
+    # One application worker; SQLite reservations also protect concurrent callers.
+    async with app.state.queue_lock:
+        store, client = app.state.store, app.state.upstream
+        network_slots = asyncio.Semaphore(10)
+
+        async def run(job):
+            async with network_slots:
+                account = store.account(job["account_id"])
+                if account is None or queue_paused(app, account):
+                    return
+                try:
+                    await poll_job(store, client, job)
+                except HTTPException as error:
+                    remember_queue_failure(app, account, error)
+
+        await asyncio.gather(*(run(job) for job in store.in_flight()))
+
+        async def dispatch_waiting(account_id, kind):
+            while True:
+                async with network_slots:
+                    account = store.account(account_id)
+                    if account is None or queue_paused(app, account):
+                        return
+                    # Claim only when ready to send, so shutdown leaves unsent jobs waiting.
+                    job = store.claim_waiting(account_id, kind)
+                    if job is None:
+                        return
+                    try:
+                        await dispatch_job(store, client, job)
+                    except HTTPException as error:
+                        remember_queue_failure(app, account, error)
+
+        await asyncio.gather(*(dispatch_waiting(account["id"], kind)
+                               for account in store.accounts() for kind in ("image", "video")))
+
+
+async def queue_worker(app: FastAPI):
+    while True:
+        await asyncio.sleep(5)
+        try:
+            await queue_cycle(app)
+        except Exception as error:
+            # Never include upstream credentials or arbitrary response bodies in logs.
+            logging.getLogger(__name__).error("Queue cycle failed (%s); will check again", type(error).__name__)
 
 
 Account = Annotated[dict, Depends(get_account)]
@@ -271,7 +383,15 @@ def create_app() -> FastAPI:
                 timeout=httpx.Timeout(60, connect=10), follow_redirects=False,
             ) as client:
                 app.state.upstream = client
-                yield
+                app.state.queue_lock = asyncio.Lock()
+                app.state.queue_backoff = {}
+                worker = asyncio.create_task(queue_worker(app))
+                try:
+                    yield
+                finally:
+                    worker.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await worker
         finally:
             store.close()
 
@@ -284,6 +404,8 @@ def create_app() -> FastAPI:
             "Video submission uses multipart form data; image submission uses a JSON queue envelope. "
             "Omitted workplace IDs resolve from the same account's `/api/v1/users/me` profile. "
             "Generation responses include account_id and request_id. Polling resolves the task's original account."
+            " Each account has independent limits of 10 active images and 10 active videos. "
+            "Overflow returns HTTP 202 with a local request ID; the server polls and drains the persistent queue."
         ),
     )
     api = APIRouter(dependencies=[Depends(require_wrapper_password)])
@@ -353,13 +475,17 @@ def create_app() -> FastAPI:
     @api.get("/api/config")
     async def config():
         return {"video_server_id": VIDEO_SERVER_ID, "image_server_id": IMAGE_SERVER_ID,
-                "image_enabled": True, "poll_interval_seconds": 5}
+                "image_enabled": True, "poll_interval_seconds": 5,
+                "concurrency_limits": {"image": GENERATION_LIMIT, "video": GENERATION_LIMIT}}
 
     @api.post("/api/v1/veo/generate", tags=["Video"], summary="Submit a video generation")
     async def generate_video(request: Request, fields: Annotated[VideoRequest, Form(media_type="multipart/form-data")], account: Account, client: Upstream):
         """`prompt` is required; other fields default to the captured Plenx video request.
 
-        Returns the upstream `task_id`, `status`, and `message`. Poll the task with
+        Under capacity, returns the upstream `task_id`, `status`, and `message`.
+        Overflow returns HTTP 202 with `task_id:null`; track `request_id` at
+        `GET /api/requests/{request_id}` while the server waits for a slot.
+        Poll submitted tasks with
         `GET /api/v1/video/status/{task_id}`. Do not automatically retry timed-out
         submissions: Plenx may have accepted them.
         """
@@ -379,6 +505,8 @@ def create_app() -> FastAPI:
 
         The task type defaults to `image/gem-pix-2`. Returns the upstream queue
         response including `task_id`; poll `GET /api/v1/queue/status/{task_id}`.
+        Overflow returns HTTP 202 with `task_id:null`; track the persistent local
+        job with `GET /api/requests/{request_id}` until it is submitted/completed.
         Plenx determines credit charges, including when `uses_credits` is false.
         """
         return await submit(request, account, client, "image", fields.model_dump(mode="json"))
@@ -408,6 +536,15 @@ def create_app() -> FastAPI:
         selected = [store.account(str(account_id))] if account_id else [store.account(item["id"]) for item in store.accounts()]
         jobs = [job for account in selected for job in redact(store.list(account["id"]), account["token"])]
         return {"requests": sorted(jobs, key=lambda job: job["created_at"], reverse=True)}
+
+    @api.get("/api/requests/{request_id}", tags=["Requests"], summary="Track a queued or submitted request")
+    async def request_status(request_id: UUID, request: Request, account_id: AccountHeader = None):
+        store = request.app.state.store
+        job = store.get(str(request_id), str(account_id) if account_id else None)
+        account = store.account(job["account_id"]) if job else None
+        if account is None:
+            raise HTTPException(404, "Request not found for this account")
+        return redact(job, account["token"])
 
     @api.get("/api/accounts", tags=["Accounts"])
     async def accounts(request: Request):

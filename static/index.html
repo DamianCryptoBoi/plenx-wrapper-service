@@ -28,12 +28,12 @@
         <label class="field-label" for="generation-account">Account</label><select id="generation-account" required><option value="">Add an account first</option></select>
         <div id="account-summary" class="account-summary" aria-live="polite" hidden></div>
         <label class="field-label prompt-label" for="prompt">Your prompt</label><textarea id="prompt" name="prompt" placeholder="A cat watching the city wake up, soft morning light…" rows="3" maxlength="20000" required></textarea>
-        <div id="video-fields" class="field-grid">
+        <div id="video-fields"><div class="field-grid">
           <label>Model<input id="video-model" value="omni-flash" required maxlength="100"></label>
           <label>Aspect ratio<input id="video-aspect" value="16:9" required maxlength="20"></label>
           <label>Duration <span class="muted">/ seconds</span><input id="video-duration" type="number" value="4" min="1" step="1" required></label>
           <label>Resolution<input id="video-resolution" value="720" required maxlength="30"></label>
-        </div>
+        </div><label class="field-label" for="video-references">Reference image URLs <span class="muted">/ optional, one per line</span></label><textarea id="video-references" rows="2" placeholder="https://images.plenxai.com/…"></textarea></div>
         <div id="image-fields" class="field-grid" hidden>
           <label>Model<input value="gem-pix-2" readonly aria-label="Image model"></label>
           <label>Aspect ratio<input id="image-aspect" value="1:1" required maxlength="20" disabled></label>
@@ -59,7 +59,7 @@
       <div class="filters"><div id="status-filters" role="group" aria-label="Filter requests"><button data-filter="all" aria-pressed="true">All</button><button data-filter="active" aria-pressed="false">In progress <span id="active-count">0</span></button><button data-filter="completed" aria-pressed="false">Completed</button><button data-filter="failed" aria-pressed="false">Issues</button></div><label class="sr-only" for="account-filter">Filter by account</label><select id="account-filter"><option value="">All accounts</option></select></div>
       <div id="request-list" class="request-list"></div>
       <div id="empty-requests" class="empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h3>Make something.</h3><p>Your generations will appear here.<br>We’ll keep an eye on the queue for you.</p></div>
-      <p class="history-note small muted">All active + latest 200 finished requests per account · polls every 5 seconds while this page is open</p>
+      <p class="history-note small muted">10 images + 10 videos active per account · server manages the queue even when this page is closed · view refreshes every 5 seconds</p>
     </section>
     <footer class="page-footer"><span>PLENX / LOCAL WORKSPACE</span><span>One prompt at a time.</span></footer>
   </main>

@@ -81,6 +81,7 @@ Generation/profile calls use the first configured account when this header is om
 | POST | `/api/v1/queue/submit` | Submit image as JSON queue envelope |
 | GET | `/api/v1/queue/status/{task_id}` | Poll image |
 | GET | `/api/requests` | All configured accounts' history; optional account header filters |
+| GET | `/api/requests/{request_id}` | Track a local queued/submitted request and its saved upstream result |
 | GET | `/api/config` | Default generation configuration |
 
 `GET /health`, `GET /llms.txt`, `GET /auth/status`, and dashboard/static/documentation pages are public; they expose no stored credentials or account data. `POST /auth/setup` creates a password only when none is configured; it requires matching JSON `password` and `confirm_password` fields. [Swagger](http://127.0.0.1:8000/docs), [ReDoc](http://127.0.0.1:8000/redoc), and [OpenAPI JSON](http://127.0.0.1:8000/openapi.json) remain available.
@@ -105,6 +106,14 @@ curl http://127.0.0.1:8000/api/v1/veo/generate \
   -F 'prompt=a cat'
 ```
 
+For a video guided by reference images, add a single multipart field containing a JSON array of HTTP/HTTPS image URLs:
+
+```sh
+--form-string 'reference_images=["https://example.test/reference.png"]'
+```
+
+The dashboard accepts one reference URL per line in Video mode. This field is optional; omit it or use `[]` for text-only video. Video references use `reference_images`, distinct from `references_urls` in the image-generation JSON payload.
+
 ```sh
 curl http://127.0.0.1:8000/api/v1/queue/submit \
   -H "Authorization: Bearer $PLENX_WRAPPER_PASSWORD" \
@@ -115,11 +124,15 @@ curl http://127.0.0.1:8000/api/v1/queue/submit \
 
 Defaults: video uses `omni-flash`, `16:9`, 4 seconds, 720, and server `56947b53-029e-4751-bbca-b9de54f5d628`; image uses `image/gem-pix-2`, `1:1`, one JPEG at `1k`, and server `dd597ae5-6ab3-4e76-9914-9da5589e21c1`. Both resolve omitted workplace IDs from the selected account's profile. You can override the workplace with an actual authorized UUID.
 
-Poll the returned task ID using the matching video or queue status route, with the wrapper password. The saved job selects its original account automatically. Upstream token replacement preserves the account ID and history; deleting and re-adding the same token restores its account ID/history.
+Each account can run **10 image generation requests and 10 video generation requests in parallel**, independently. A slot stays occupied while submitting, queued at Plenx, or processing. An image request with multiple outputs counts as one request. Extra requests are saved in a FIFO SQLite queue and return HTTP 202 with `status:"waiting"`, `task_id:null`, `request_id`, `queue_position`, and a `status_url` such as `/api/requests/<request_id>`. Do not resubmit an accepted queued request.
+
+Poll `/api/requests/{request_id}` with the wrapper password for queued or submitted work. Its `response` field contains the upstream result after submission. Once an upstream `task_id` exists, you can also poll the original matching video/queue status route for the upstream response directly. The server checks tasks and starts waiting jobs every five seconds, including when the browser is closed. The queue survives restarts. Removing an account cancels its unsent waiting jobs; deleting/re-adding the same token restores other history without resubmitting cancelled work.
+
+The saved job selects its original account automatically. Upstream token replacement preserves the account ID and history. Existing jobs submitted before the limit was installed finish normally; new jobs wait until capacity is available.
 
 `GET /api/v1/users/me` reports separate `credit_balance`, `free_credits`, and `ruby_balance` values and daily image usage/limit. The dashboard refreshes jobs every five seconds and balances once a minute, plus around submissions/completions and manual refresh. Profiles stay in page memory. Upstream 401/403 responses include `X-Plenx-Status`; they mean the operator needs to fix that server-side account credential. A wrapper-auth 401 does not include that header.
 
-History keeps all active jobs plus the latest 200 terminal jobs per account. A failed poll keeps the task active. Generation POSTs are never retried automatically; uncertain acceptance is saved as `submission_unknown`. API clients must implement their own polling; dashboard polling runs only while the page is visible and auto refresh is enabled.
+History keeps all active, waiting and unresolved jobs plus the latest 200 terminal jobs per account. A failed poll keeps the task active. Generation POSTs are never retried automatically; uncertain acceptance is saved as `submission_unknown` and retains its slot pending operator reconciliation. Automatic work honors upstream 429 backoff and pauses an account on upstream 401/403 until it is updated. Clients poll saved results; the dashboard refreshes its view while visible and auto refresh is enabled. Disabling that display refresh does not pause the server queue.
 
 ## Configuration and checks
 
