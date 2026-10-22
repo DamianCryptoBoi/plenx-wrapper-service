@@ -52,7 +52,8 @@ class ServiceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.db = Path(self.temp.name) / "jobs.sqlite3"
-        self.env = patch.dict(os.environ, {"PLENX_DB_PATH": str(self.db), "PLENX_WRAPPER_PASSWORD": PASSWORD})
+        self.env = patch.dict(os.environ, {"PLENX_DB_PATH": str(self.db), "PLENX_WRAPPER_PASSWORD": PASSWORD,
+                                           "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.requests = []
@@ -68,7 +69,8 @@ class ServiceTests(unittest.TestCase):
             return self.upstream_response
 
         self.app = main.create_app()
-        self.upstream = httpx.AsyncClient(transport=httpx.MockTransport(upstream), base_url="https://plenxai.com")
+        self.transport = httpx.MockTransport(upstream)
+        self.upstream = httpx.AsyncClient(transport=self.transport, base_url="https://plenxai.com")
         self.app.dependency_overrides[main.get_upstream] = lambda: self.upstream
         self.client = TestClient(self.app)
         self.client.__enter__()
@@ -200,7 +202,11 @@ class ServiceTests(unittest.TestCase):
         self.assertNotIn(TOKEN, json.dumps(self.history()))
         self.assertEqual(self.db.stat().st_mode & 0o777, 0o600)
         self.assertNotIn(TOKEN, self.client.get("/api/accounts", headers=AUTH).text)
-        with TestClient(main.create_app()) as restarted:
+        real_client = httpx.AsyncClient
+        def mock_client(**kwargs):
+            return real_client(transport=self.transport, **kwargs)
+        # Background profile checks begin during lifespan startup, before routes run.
+        with patch.object(main.httpx, "AsyncClient", side_effect=mock_client), TestClient(main.create_app()) as restarted:
             jobs = restarted.get("/api/requests", headers=AUTH).json()["requests"]
             self.assertEqual(jobs[0]["task_id"], TASK)
 
@@ -395,7 +401,8 @@ class FirstVisitSetupTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        self.env = patch.dict(os.environ, {"PLENX_DB_PATH": str(self.directory / "jobs.sqlite3"), "PLENX_WRAPPER_PASSWORD": ""})
+        self.env = patch.dict(os.environ, {"PLENX_DB_PATH": str(self.directory / "jobs.sqlite3"), "PLENX_WRAPPER_PASSWORD": "",
+                                           "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.client = TestClient(main.create_app())

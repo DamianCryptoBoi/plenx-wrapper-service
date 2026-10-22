@@ -19,7 +19,7 @@ PLENX_WRAPPER_PASSWORD='choose-your-wrapper-password' uv run uvicorn main:app --
 
 If `PLENX_WRAPPER_PASSWORD` is unset or empty and no password has been saved, the first dashboard visit asks you to create and confirm a password. API access remains locked with HTTP 503 until setup completes. The password is saved in `data/wrapper-password` (beside the configured SQLite database), with file mode `0600`, and reused on restart. Setup works only once; it cannot replace an existing password. Existing saved passwords from earlier installations continue to work.
 
-Passwords must use printable ASCII without whitespace. Changing `PLENX_WRAPPER_PASSWORD` or the saved password file takes effect after a server restart and does not change job ownership. A nonempty environment variable takes precedence over the file. `.env` files are not loaded automatically.
+Passwords must use printable ASCII without whitespace. Changing `PLENX_WRAPPER_PASSWORD` or the saved password file takes effect after a server restart and does not change job ownership. A nonempty environment variable takes precedence over the saved password file. Server settings can also be set in `.env` beside `main.py`; it is loaded automatically at startup, and existing process environment variables take precedence over `.env` values. See [.env.example](.env.example).
 
 Open [the dashboard](http://127.0.0.1:8000), enter the wrapper password, then add Plenx accounts. The wrapper password stays in page memory only; reload/logout requires signing in again. Plenx tokens are submitted once during account setup or replacement, stored in the private server database, and never returned by the API or saved in browser storage.
 
@@ -50,6 +50,25 @@ pm2 stop plenx-service
 For reboot restoration, run `pm2 startup` once as the same user, execute the sudo command it prints, then run `pm2 save`. The installer already saves the process list, so an existing PM2 boot setup will restore it. These follow the official [uv installer](https://docs.astral.sh/uv/reference/installer/), [PM2 configuration](https://pm2.keymetrics.io/docs/usage/application-declaration/), and [PM2 startup](https://pm2.keymetrics.io/docs/usage/startup/) instructions.
 
 After updating the project, rerun the setup script with the same port to sync dependencies and restart. `ecosystem.config.js` is the PM2 launch configuration; `PLENX_PORT` and `PLENX_UV_BIN` select the port and uv executable when loading it directly. The setup script supplies both automatically. No Uvicorn reload watcher or extra workers run on the VPS.
+
+## Telegram startup and token alerts
+
+Create `.env` beside `main.py` (copy [.env.example](.env.example) if needed), then fill in these server-only values:
+
+```dotenv
+TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
+TELEGRAM_CHAT_ID="your-chat-id"
+```
+
+Run `uv sync --locked` after updating the code to install the new dependency (the VPS setup script does this too). Run the VPS setup script for a new installation, or `pm2 restart plenx-service` for an existing installation. Restart again after changing `.env`; edits are not applied live. `.env` is ignored by Git. Restrict access with `chmod 600 .env`.
+
+The bot must be able to send messages to the destination chat. For a private chat, send `/start` to your bot first. The chat ID can identify your private chat or a group. Notifications use Telegram's [sendMessage API](https://core.telegram.org/bots/api#sendmessage). Keep these settings on the server; do not put them in generation requests or commit them. Exported process/PM2 values take precedence over `.env`, including empty values. To use exports instead, set both variables and run `pm2 restart plenx-service --update-env`, then `pm2 save`. PM2 saves its process environment, so protect its home directory and backups too.
+
+The service sends a startup notice for each application start/restart, checks every configured Plenx account immediately, then checks `/api/v1/users/me` every **300 seconds**. Accounts without active generation jobs are included. It runs independently of the dashboard and generation queue.
+
+A failed check sends the account name/ID, service hostname, time, and a safe reason. HTTP 401/403 is identified as rejected authentication; timeouts and other upstream failures are reported as check failures, without claiming the token expired. Inactive accounts and invalid profile responses also fail the check. Plenx tokens, wrapper passwords, and raw upstream response bodies are never included in alerts.
+
+Only one alert is sent per ongoing failure for a particular account token. A successful check or token replacement re-arms the alert. Failed Telegram deliveries, including startup notices, are retried at the next five-minute check. Telegram failures do not prevent startup, API requests, or generation. The monitor does not alter queue reservations or automatically replace credentials. Without both Telegram settings, checks still run, but notifications are disabled and startup logs explain the missing configuration.
 
 ## API for agents
 
@@ -141,8 +160,10 @@ History keeps all active, waiting and unresolved jobs plus the latest 200 termin
 | `PLENX_WRAPPER_PASSWORD` | First-visit setup; saved in the private `wrapper-password` file beside the database |
 | `PLENX_BASE_URL` | `https://plenxai.com` |
 | `PLENX_DB_PATH` | `data/jobs.sqlite3` beside `main.py` |
+| `TELEGRAM_BOT_TOKEN` | Unset; Telegram notifications require this and `TELEGRAM_CHAT_ID` |
+| `TELEGRAM_CHAT_ID` | Unset; destination private/group chat ID |
 
-Environment variables are read at startup. Use one Uvicorn worker. Keep `PLENX_BASE_URL` pointed at a trusted server: it receives the stored Plenx credentials.
+Server settings are loaded at startup from `.env` beside `main.py`, with the existing process environment taking precedence. Missing `.env` is allowed. Use one Uvicorn worker. Keep `PLENX_BASE_URL` pointed at a trusted server: it receives the stored Plenx credentials. `PLENX_PORT` and `PLENX_UV_BIN` configure the PM2 launcher through its process environment or VPS script; the app's `.env` loader does not configure that launcher.
 
 ```sh
 uv run python -m unittest discover -s tests -v

@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 import httpx
+from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -24,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, Json, SecretStr, ValidationError
 
 from store import GENERATION_LIMIT, Store
+from monitoring import ServiceMonitor
 
 
 ROOT = Path(__file__).resolve().parent
@@ -371,6 +373,7 @@ Upstream = Annotated[httpx.AsyncClient, Depends(get_upstream)]
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        load_dotenv(ROOT / ".env", override=False)
         db_path = Path(os.getenv("PLENX_DB_PATH", str(ROOT / "data/jobs.sqlite3")))
         store = Store(db_path)
         app.state.store = store
@@ -381,17 +384,25 @@ def create_app() -> FastAPI:
             async with httpx.AsyncClient(
                 base_url=os.getenv("PLENX_BASE_URL", "https://plenxai.com"),
                 timeout=httpx.Timeout(60, connect=10), follow_redirects=False,
-            ) as client:
+            ) as client, httpx.AsyncClient(
+                base_url="https://api.telegram.org", timeout=10, follow_redirects=False,
+            ) as telegram_client:
                 app.state.upstream = client
                 app.state.queue_lock = asyncio.Lock()
                 app.state.queue_backoff = {}
                 worker = asyncio.create_task(queue_worker(app))
+                monitor = ServiceMonitor(app, telegram_client)
+                monitor_task = asyncio.create_task(monitor.run())
                 try:
                     yield
                 finally:
                     worker.cancel()
+                    monitor_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await worker
+                    with suppress(asyncio.CancelledError):
+                        await monitor_task
+                    monitor.close()
         finally:
             store.close()
 

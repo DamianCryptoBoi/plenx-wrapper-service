@@ -8,6 +8,8 @@ Preserve video server ID `56947b53-029e-4751-bbca-b9de54f5d628`; default model/a
 
 Files: `main.py` owns routes, validation, upstream HTTP, and app lifecycle; `store.py` owns SQLite history; `static/` owns the dashboard; `tests/test_service.py` tests the API with a simulated upstream transport; `README.md` documents setup and curl requests.
 
+Token monitoring: `monitoring.py` checks all configured accounts through `/api/v1/users/me` at startup and every 300 seconds. A separate Telegram client sends service startup and deduplicated failed-check notices using server-only `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`. Failed notification delivery is retried next cycle. The monitor never sends Plenx tokens or raw upstream errors to Telegram and does not block the API or change generation reservations.
+
 - [x] Write failing tests for multipart/Bearer forwarding, image JSON forwarding, default IDs, account routing, status persistence, rejected inputs, upstream failures, wrapper-auth isolation, write-only credentials, private storage, and history migration.
 - [x] Implement service, dependency lock, SQLite history, and both media flows; run contract tests.
 - [x] Build a responsive dashboard with add/edit/remove accounts, video and image submission, request filtering, auto polling, and media previews. Preserve job/account association across account switches.

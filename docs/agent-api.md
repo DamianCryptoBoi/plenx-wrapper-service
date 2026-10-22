@@ -13,6 +13,7 @@ Use this document to operate the running service through HTTP. No browser intera
 - Do not print secrets or put them in URLs, prompts, artifacts, or result messages. Do not forward the wrapper Authorization header to returned CDN media URLs.
 - One shared wrapper password permits using and managing all configured accounts; this service does not implement separate caller/admin roles.
 - If the operator has not configured a password, `GET /auth/status` returns `{"setup_required":true}` and `/api/*` returns HTTP 503. Ask the operator to open the dashboard and create/confirm a wrapper password, then provide it to the caller. Generation agents must not choose or reset the operator's password automatically. A configured environment password or an existing saved password skips setup.
+- The server checks every configured account's `/api/v1/users/me` on startup and every five minutes. If the operator sets server-only `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in the process environment or `.env` beside `main.py`, it sends startup and failed-check notices. `.env` loads on server startup; process environment values take precedence. These Telegram settings are not generation request fields and are never returned by this API. Failed checks distinguish rejected authentication from network/upstream problems; do not infer token expiry from a timeout or 5xx. Alerts are deduplicated until recovery or token replacement. Monitoring does not change queue reservations or replace tokens.
 
 Client example variables:
 
